@@ -3,7 +3,9 @@ return [
     'components' => [
         'shop' => [
             'paysystemHandlers' => [
-                \skeeks\cms\shop\sberbank\SberbankPaysystemHandler::class
+                'robokassa' => [
+                    'class' => \skeeks\cms\shop\robokassa\RobokassaPaysystemHandler::class
+                ]
             ],
         ],
 
@@ -13,7 +15,7 @@ return [
                     'class'      => 'yii\log\FileTarget',
                     'levels'     => ['info', 'warning', 'error'],
                     'logVars'    => [],
-                    'categories' => [\skeeks\cms\shop\sberbank\SberbankPaysystemHandler::class, \skeeks\cms\shop\sberbank\controllers\SberbankController::class],
+                    'categories' => [\skeeks\cms\shop\robokassa\RobokassaPaysystemHandler::class, \skeeks\cms\shop\robokassa\controllers\RobokassaController::class],
                     'logFile'    => '@runtime/logs/robokassa-info.log',
                 ],
 
@@ -21,7 +23,7 @@ return [
                     'class'      => 'yii\log\FileTarget',
                     'levels'     => ['error'],
                     'logVars'    => [],
-                    'categories' => [\skeeks\cms\shop\sberbank\SberbankPaysystemHandler::class, \skeeks\cms\shop\sberbank\controllers\SberbankController::class],
+                    'categories' => [\skeeks\cms\shop\robokassa\RobokassaPaysystemHandler::class, \skeeks\cms\shop\robokassa\controllers\RobokassaController::class],
                     'logFile'    => '@runtime/logs/robokassa-errors.log',
                 ],
             ],

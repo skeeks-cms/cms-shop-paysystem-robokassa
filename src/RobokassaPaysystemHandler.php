@@ -15,6 +15,7 @@ use skeeks\cms\shop\models\ShopPayment;
 use skeeks\cms\shop\paysystem\PaysystemHandler;
 use skeeks\yii2\form\fields\BoolField;
 use skeeks\yii2\form\fields\FieldSet;
+use skeeks\yii2\form\fields\HtmlBlock;
 use yii\base\Exception;
 use yii\helpers\ArrayHelper;
 use yii\helpers\Json;
@@ -96,7 +97,7 @@ class RobokassaPaysystemHandler extends PaysystemHandler
      */
     public function actionPaymentResponse(ShopBill $shopBill)
     {
-        return $this->getMerchant()->payment($shopBill->money->amount, $shopBill->id, \Yii::t('skeeks/shop/app', 'Payment order'), null, $shopBill->shopOrder->email);
+        return $this->payment($shopBill->money->amount, $shopBill->id, \Yii::t('skeeks/shop/app', 'Payment order'), null, $shopBill->shopOrder->email);
     }
 
     /**
@@ -106,41 +107,39 @@ class RobokassaPaysystemHandler extends PaysystemHandler
     public function actionPayOrder(ShopOrder $shopOrder)
     {
         $shopBill = $this->getShopBill($shopOrder);
-        return $this->getMerchant()->payment($shopBill->money->amount, $shopBill->id, \Yii::t('skeeks/shop/app', 'Payment order'), null, $shopBill->shopOrder->email);
+        return $this->payment($shopBill->money->amount, $shopBill->id, \Yii::t('skeeks/shop/app', 'Payment order'), null, $shopBill->shopOrder->email);
     }
 
-    /**
-     * @return \skeeks\cms\shop\paySystems\robokassa\Merchant
-     * @throws \yii\base\InvalidConfigException
-     */
-    public function getMerchant()
-    {
-        /**
-         * @var \skeeks\cms\shop\paySystems\robokassa\Merchant $merchant
-         */
-        $merchant = \Yii::createObject(ArrayHelper::merge($this->toArray([
-            'sMerchantLogin',
-            'sMerchantPass1',
-            'sMerchantPass2',
-        ]), [
-            'class'   => '\skeeks\cms\shop\paySystems\robokassa\Merchant',
-            'baseUrl' => $this->baseUrl,
-            'isLive'  => (bool)$this->isLive,
-        ]));
-
-        return $merchant;
-    }
 
     /**
      * @return array
      */
     public function getConfigFormFields()
     {
+        $successUrl = Url::to(['/robokassa/robokassa/success'], true);
+        $resultUrl = Url::to(['/robokassa/robokassa/result'], true);
+        $failUrl = Url::to(['/robokassa/robokassa/fail'], true);
+
+        $text = <<<HTML
+<div class="col-12" style="margin-top: 20px;">
+<div class="alert alert-default">
+<p>В личном кабинете <a href="https://partner.robokassa.ru/" target="_blank">https://partner.robokassa.ru/</a>, выбирите нужный магазин и пропишите настройки:</p> 
+<p>Result Url: <b>{$resultUrl}</b></p> 
+<p>Success Url: <b>{$successUrl}</b></p> 
+<p>Fail Url: <b>{$failUrl}</b></p> 
+</div>
+</div>
+HTML;
         return [
             'main' => [
                 'class'  => FieldSet::class,
                 'name'   => 'Основные',
                 'fields' => [
+                    'text' => [
+                        'class' => HtmlBlock::class,
+                        'content' => $text,
+                    ],
+
                     'isLive' => [
                         'class'     => BoolField::class,
                         'allowNull' => false,
@@ -158,9 +157,9 @@ class RobokassaPaysystemHandler extends PaysystemHandler
 
     public function renderConfigForm(ActiveForm $activeForm)
     {
-        $successUrl = Url::to(['/shop/robokassa/success'], true);
-        $resultUrl = Url::to(['/shop/robokassa/result'], true);
-        $failUrl = Url::to(['/shop/robokassa/fail'], true);
+        $successUrl = Url::to(['/robokassa/robokassa/success'], true);
+        $resultUrl = Url::to(['/robokassa/robokassa/result'], true);
+        $failUrl = Url::to(['/robokassa/robokassa/fail'], true);
 
         echo Alert::widget([
             'closeButton' => false,
@@ -181,4 +180,69 @@ HTML
         echo $activeForm->field($this, 'sMerchantPass1')->textInput();
         echo $activeForm->field($this, 'sMerchantPass2')->textInput();
     }
+
+
+    public function payment(
+        $nOutSum,
+        $nInvId,
+        $sInvDesc = null,
+        $sIncCurrLabel = null,
+        $sEmail = null,
+        $sCulture = null,
+        $shp = []
+    ) {
+        $url = $this->baseUrl;
+
+        $signature = "{$this->sMerchantLogin}:{$nOutSum}:{$nInvId}:{$this->sMerchantPass1}";
+        if (!empty($shp)) {
+            $signature .= ':'.$this->implodeShp($shp);
+        }
+
+        $sSignatureValue = md5($signature);
+
+        $data = [
+            'MerchantLogin'      => $this->sMerchantLogin,
+            'OutSum'         => $nOutSum,
+            'InvId'          => $nInvId,
+            'Description'           => $sInvDesc,
+            'SignatureValue' => $sSignatureValue,
+            'IncCurrLabel'   => $sIncCurrLabel,
+            'Email'          => $sEmail,
+            'Culture'        => $sCulture,
+        ];
+
+        if (!$this->isLive) {
+            $data['isTest'] = 1;
+        }
+
+        $url .= '?'.http_build_query($data);
+
+        if (!empty($shp) && ($query = http_build_query($shp)) !== '') {
+            $url .= '&'.$query;
+        }
+
+        \Yii::$app->user->setReturnUrl(\Yii::$app->request->getUrl());
+        return \Yii::$app->response->redirect($url);
+    }
+
+    private function implodeShp($shp)
+    {
+        ksort($shp);
+        foreach ($shp as $key => $value) {
+            $shp[$key] = $key.'='.$value;
+        }
+
+        return implode(':', $shp);
+    }
+
+    public function checkSignature($sSignatureValue, $nOutSum, $nInvId, $sMerchantPass, $shp)
+    {
+        $signature = "{$nOutSum}:{$nInvId}:{$sMerchantPass}";
+        if (!empty($shp)) {
+            $signature .= ':'.$this->implodeShp($shp);
+        }
+        return strtolower(md5($signature)) === strtolower($sSignatureValue);
+
+    }
+
 }

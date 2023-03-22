@@ -11,16 +11,13 @@ namespace skeeks\cms\shop\robokassa;
 use skeeks\cms\helpers\StringHelper;
 use skeeks\cms\shop\models\ShopBill;
 use skeeks\cms\shop\models\ShopOrder;
-use skeeks\cms\shop\models\ShopPayment;
 use skeeks\cms\shop\paysystem\PaysystemHandler;
 use skeeks\yii2\form\fields\BoolField;
 use skeeks\yii2\form\fields\FieldSet;
 use skeeks\yii2\form\fields\HtmlBlock;
 use yii\base\Exception;
 use yii\helpers\ArrayHelper;
-use yii\helpers\Json;
 use yii\helpers\Url;
-use yii\httpclient\Client;
 
 /**
  * @property string $baseUrl
@@ -34,7 +31,13 @@ class RobokassaPaysystemHandler extends PaysystemHandler
     public $sMerchantLogin = '';
     public $sMerchantPass1 = '';
     public $sMerchantPass2 = '';
-    
+
+    /**
+     * @var bool Отправлять данные по чекам?
+     */
+    public $is_receipt = false;
+
+
     /**
      * Можно задать название и описание компонента
      * @return array
@@ -59,6 +62,7 @@ class RobokassaPaysystemHandler extends PaysystemHandler
             [['sMerchantPass1'], 'string'],
             [['sMerchantPass2'], 'string'],
             [['isLive'], 'boolean'],
+            [['is_receipt'], 'boolean'],
         ]);
     }
 
@@ -69,13 +73,15 @@ class RobokassaPaysystemHandler extends PaysystemHandler
             'sMerchantLogin' => 'sMerchantLogin',
             'sMerchantPass1' => 'sMerchantPass1',
             'sMerchantPass2' => 'sMerchantPass2',
+            'is_receipt'     => "Отправлять данные для формирования чеков?",
         ]);
     }
 
     public function attributeHints()
     {
         return ArrayHelper::merge(parent::attributeHints(), [
-            'isLive' => 'Боевой режим использует адрес: https://auth.robokassa.ru/Merchant/Index.aspx, не боевой — http://test.robokassa.ru/Index.aspx',
+            'isLive'     => 'Боевой режим использует адрес: https://auth.robokassa.ru/Merchant/Index.aspx, не боевой — http://test.robokassa.ru/Index.aspx',
+            'is_receipt' => "Необходимо передавать, если вы отправляете данные для формирования чеков по одному из сценариев: Платеж и чек одновременно или Сначала чек, потом платеж.",
         ]);
     }
 
@@ -136,11 +142,15 @@ HTML;
                 'name'   => 'Основные',
                 'fields' => [
                     'text' => [
-                        'class' => HtmlBlock::class,
+                        'class'   => HtmlBlock::class,
                         'content' => $text,
                     ],
 
-                    'isLive' => [
+                    'isLive'     => [
+                        'class'     => BoolField::class,
+                        'allowNull' => false,
+                    ],
+                    'is_receipt' => [
                         'class'     => BoolField::class,
                         'allowNull' => false,
                     ],
@@ -193,7 +203,119 @@ HTML
     ) {
         $url = $this->baseUrl;
 
-        $signature = "{$this->sMerchantLogin}:{$nOutSum}:{$nInvId}:{$this->sMerchantPass1}";
+        $shopBill = ShopBill::findOne($nInvId);
+        if (!$shopBill) {
+            throw new Exception("Счет не найден: ".$nInvId);
+        }
+
+        if (!$shopBill->shopOrder) {
+            throw new Exception("Заказ не найден: ".$shopBill->shopOrder->id);
+        }
+        
+        if (!$sEmail) {
+            $sEmail = $shopBill->shopOrder->contact_email;
+        }
+        
+        $sInvDesc = "Оплата заказа №" . $shopBill->shopOrder->id . " по счету №" . $shopBill->id;
+
+        if ($this->is_receipt) {
+
+
+
+            $receipt = [];
+            
+            foreach ($shopBill->shopOrder->shopOrderItems as $shopOrderItem) {
+                $itemData = [];
+
+                $itemData['name'] = StringHelper::substr($shopOrderItem->name, 0, 128);
+                $itemData['quantity'] = (float)$shopOrderItem->quantity;
+                //$itemData['cost'] = $shopOrderItem->money->amount;
+                $itemData['sum'] = $shopOrderItem->money->amount * $shopOrderItem->quantity;
+                $itemData['payment_method'] = 'full_payment';
+                $itemData['payment_object'] = 'commodity';
+                $itemData['tax'] = 'none';
+
+                $receipt['items'][] = $itemData;
+            }
+
+            /**
+             * Стоимость доставки так же нужно добавить
+             */
+            if ((float)$shopBill->shopOrder->moneyDelivery->amount > 0) {
+                $itemData = [];
+                $itemData['name'] = StringHelper::substr($shopOrder->shopDelivery->name, 0, 128);
+                $itemData['quantity'] = 1;
+                $itemData['tax'] = 'none'; //todo: доработать этот момент
+                $itemData['sum'] = $shopOrder->moneyDelivery->amount;
+                $itemData['payment_method'] = 'full_payment';
+                $itemData['payment_object'] = 'service';
+
+                $receipt['items'][] = $itemData;
+            }
+
+            $totalCalcAmount = 0;
+            foreach ($receipt['items'] as $itemData) {
+                $totalCalcAmount = $totalCalcAmount + ($itemData['sum']);
+            }
+
+            $discount = 0;
+            if ($totalCalcAmount > (float)$nOutSum) {
+                $discount = abs((float)$nOutSum - $totalCalcAmount);
+            }
+
+            /**
+             * Стоимость скидки
+             */
+            //todo: тут можно еще подумать, это временное решение
+            if ($discount > 0) {
+                $discountValue = $discount;
+                foreach ($receipt['items'] as $key => $item) {
+                    if ($discountValue == 0) {
+                        break;
+                    }
+                    if ($item['sum']) {
+                        if ($item['sum'] >= $discountValue) {
+                            $item['sum'] = $item['sum'] - $discountValue;
+                            $discountValue = 0;
+                        } else {
+                            $item['sum'] = 0;
+                            $discountValue = $discountValue - $item['sum'];
+                        }
+                    }
+
+                    $receipt['items'][$key] = $item;
+                }
+
+                //print_r($receipt);die;
+                //$receipt['items'][] = $itemData;
+            }
+
+
+            $arr_encode = json_encode($receipt); // Преобразовываем JSON в строку
+
+            $receipt = urlencode($arr_encode);
+            $receipt_urlencode = urlencode($receipt);
+
+            $signatureData = [
+                $this->sMerchantLogin,
+                $nOutSum,
+                $nInvId,
+                $receipt,
+                $this->sMerchantPass1,
+            ];
+
+        } else {
+            $signatureData = [
+                $this->sMerchantLogin,
+                $nOutSum,
+                $nInvId,
+                $this->sMerchantPass1,
+            ];
+        }
+
+        //$signature = "{$this->sMerchantLogin}:{$nOutSum}:{$nInvId}:{$this->sMerchantPass1}";
+        $signature = implode(":", $signatureData);
+
         if (!empty($shp)) {
             $signature .= ':'.$this->implodeShp($shp);
         }
@@ -201,15 +323,20 @@ HTML
         $sSignatureValue = md5($signature);
 
         $data = [
-            'MerchantLogin'      => $this->sMerchantLogin,
+            'MerchantLogin'  => $this->sMerchantLogin,
             'OutSum'         => $nOutSum,
             'InvId'          => $nInvId,
-            'Description'           => $sInvDesc,
+            'Description'    => $sInvDesc,
             'SignatureValue' => $sSignatureValue,
             'IncCurrLabel'   => $sIncCurrLabel,
             'Email'          => $sEmail,
             'Culture'        => $sCulture,
         ];
+        $recipientHtml = '';
+        if ($this->is_receipt) {
+            $data['Receipt'] = $receipt_urlencode;
+            $recipientHtml = '<input type="hidden" name="Receipt" value="' . $receipt_urlencode . '">';
+        }
 
         if (!$this->isLive) {
             $data['isTest'] = 1;
@@ -221,8 +348,31 @@ HTML
             $url .= '&'.$query;
         }
 
-        \Yii::$app->user->setReturnUrl(\Yii::$app->request->getUrl());
-        return \Yii::$app->response->redirect($url);
+        $baseUrl = $this->baseUrl;
+        $form = <<<HTML
+<html>
+
+<form id="sxform" action='{$baseUrl}' method=POST>
+    <input type="hidden" name="MerchantLogin" value="{$this->sMerchantLogin}">
+    <input type="hidden" name="OutSum" value="{$nOutSum}">
+    <input type="hidden" name="InvId" value="{$nInvId}">
+    <input type="hidden" name="Description" value='{$sInvDesc}'>
+    <input type="hidden" name="SignatureValue" value="{$sSignatureValue}">
+    <input type="hidden" name="IncCurrLabel" value="{$sIncCurrLabel}">
+    <input type="hidden" name="Culture" value="{$sCulture}">
+    {$recipientHtml}
+    <input type="submit" value='Pay'>
+</form>
+<script type="text/javascript">
+    document.getElementById('sxform').submit();
+</script>
+</html>
+HTML
+;
+        
+        return $form;    
+        /*\Yii::$app->user->setReturnUrl(\Yii::$app->request->getUrl());
+        return \Yii::$app->response->redirect($url);*/
     }
 
     private function implodeShp($shp)
